@@ -1,0 +1,29 @@
+{
+  "segments": [
+    {
+      "name": "segment-00",
+      "host": "127.0.0.1",
+      "port": 6431,
+      "database": "test",
+      "user": "postgres",
+      "password": "postgres"
+    },
+    {
+      "name": "segment-01",
+      "host": "127.0.0.1",
+      "port": 6432,
+      "database": "test",
+      "user": "postgres",
+      "password": "postgres"
+    },
+    {
+      "name": "segment-02",
+      "host": "127.0.0.1",
+      "port": 6433,
+      "database": "test",
+      "user": "postgres",
+      "password": "postgres"
+    }
+  ]
+}
+
