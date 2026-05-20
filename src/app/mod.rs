@@ -1,4 +1,4 @@
-use crate::query::{execute_query, load_config, load_schema, validate_config_path};
+use crate::query::{execute_query, load_config, load_schema, validate_config_path, QueryOptions};
 use crate::state::AppState;
 use crate::tui::{self, CrudMode};
 use anyhow::{bail, Context, Result};
@@ -14,10 +14,11 @@ pub async fn run(mut state: AppState) -> Result<()> {
         println!("=== multiSectorBD ===");
         println!("Конфиг: {}", state.config_path.display());
         println!(
-            "Схема: {} таблиц (эталон: {}) | Таймаут: {} с",
+            "Схема: {} таблиц (эталон: {}) | Таймаут: {} с | Параллельно сегментов: {}",
             state.schema.tables.len(),
             state.schema_source,
-            state.connect_timeout_secs
+            state.connect_timeout_secs,
+            state.max_concurrent_segments
         );
 
         let items = [
@@ -39,10 +40,10 @@ pub async fn run(mut state: AppState) -> Result<()> {
             .interact()?;
 
         match choice {
-            0 => run_crud(&state, CrudMode::Select, &theme).await?,
-            1 => run_crud(&state, CrudMode::Insert, &theme).await?,
-            2 => run_crud(&state, CrudMode::Update, &theme).await?,
-            3 => run_crud(&state, CrudMode::Delete, &theme).await?,
+            0 => run_select(&state, &theme).await?,
+            1 => run_crud(&state, CrudMode::Insert, &theme, QueryOptions::default()).await?,
+            2 => run_crud(&state, CrudMode::Update, &theme, QueryOptions::default()).await?,
+            3 => run_crud(&state, CrudMode::Delete, &theme, QueryOptions::default()).await?,
             4 => run_free_sql(&state, &theme).await?,
             5 => tui::schema::browse(&state.schema, &state.schema_source)?,
             6 => {
@@ -63,7 +64,29 @@ pub async fn run(mut state: AppState) -> Result<()> {
     Ok(())
 }
 
-async fn run_crud(state: &AppState, mode: CrudMode, theme: &ColorfulTheme) -> Result<()> {
+async fn run_select(state: &AppState, theme: &ColorfulTheme) -> Result<()> {
+    let items = [
+        "Все сегменты — полный обход",
+        "До первого совпадения — остановиться, когда найдена хотя бы одна строка",
+    ];
+    let choice = Select::with_theme(theme)
+        .with_prompt("SELECT — режим поиска по сегментам")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    let options = QueryOptions {
+        stop_on_first_match: choice == 1,
+    };
+    run_crud(state, CrudMode::Select, theme, options).await
+}
+
+async fn run_crud(
+    state: &AppState,
+    mode: CrudMode,
+    theme: &ColorfulTheme,
+    options: QueryOptions,
+) -> Result<()> {
     let built = match tui::sql_ops::run(&state.schema, mode)? {
         Some(b) => b,
         None => return Ok(()),
@@ -73,8 +96,12 @@ async fn run_crud(state: &AppState, mode: CrudMode, theme: &ColorfulTheme) -> Re
     let sql_for_browse: String = built.sql.clone();
 
     let filter = pick_segment_filter(state, theme)?;
-    println!("\nВыполняется запрос...");
-    match execute_query(state, built.sql, &filter).await {
+    if options.stop_on_first_match {
+        println!("\nВыполняется запрос (остановка после первого сегмента с результатом)...");
+    } else {
+        println!("\nВыполняется запрос...");
+    }
+    match execute_query(state, built.sql, &filter, options).await {
         Ok(results) => {
             if let Err(e) = tui::results::browse(&results, sql_for_browse) {
                 eprintln!("\nОшибка просмотра: {e:#}");
@@ -117,7 +144,7 @@ async fn run_free_sql(state: &AppState, theme: &ColorfulTheme) -> Result<()> {
     let sql_for_browse: String = sql.clone();
 
     println!("\nВыполняется запрос...");
-    match execute_query(state, sql, &filter).await {
+    match execute_query(state, sql, &filter, QueryOptions::default()).await {
         Ok(results) => {
             if let Err(e) = tui::results::browse(&results, sql_for_browse) {
                 eprintln!("\nОшибка просмотра: {e:#}");
@@ -225,6 +252,7 @@ async fn settings_menu(state: &mut AppState, theme: &ColorfulTheme) -> Result<()
         let items = [
             "Путь к segments.json",
             "Таймаут подключения (сек)",
+            "Параллельных сегментов при запросе",
             "Перезагрузить схему БД",
             "Назад в главное меню",
         ];
@@ -232,7 +260,7 @@ async fn settings_menu(state: &mut AppState, theme: &ColorfulTheme) -> Result<()
         let choice = Select::with_theme(theme)
             .with_prompt("Настройки")
             .items(&items)
-            .default(3)
+            .default(4)
             .interact()?;
 
         match choice {
@@ -256,8 +284,20 @@ async fn settings_menu(state: &mut AppState, theme: &ColorfulTheme) -> Result<()
                     .parse()
                     .context("таймаут должен быть числом")?;
             }
-            2 => reload_schema(state).await?,
-            3 => break,
+            2 => {
+                let n: String = Input::with_theme(theme)
+                    .with_prompt("Сколько сегментов одновременно (1 — по одному)")
+                    .default(state.max_concurrent_segments.to_string())
+                    .interact_text()?;
+                let n: usize = n.trim().parse().context("число должно быть целым")?;
+                if n == 0 {
+                    bail!("минимум 1 параллельный сегмент");
+                }
+                state.max_concurrent_segments = n;
+                println!("Параллельных подключений к сегментам: {n}");
+            }
+            3 => reload_schema(state).await?,
+            4 => break,
             _ => unreachable!(),
         }
     }

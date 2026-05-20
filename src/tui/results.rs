@@ -4,10 +4,10 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::Value;
 use std::io::stdout;
@@ -87,7 +87,7 @@ pub fn browse(results: &[Value], sql: String) -> Result<()> {
             );
 
             if show_sql {
-                draw_sql_popup(f, sql);
+                draw_sql_popup(f, &*sql);
             }
         })?;
 
@@ -464,6 +464,45 @@ fn set_expanded(tree: &mut [SegmentNode], node: NodeRef, expanded: bool) {
 
 fn page_size() -> usize {
     20
+}
+
+fn draw_sql_popup(f: &mut Frame, sql: &str) {
+    let area = centered_rect(80, 60, f.area());
+
+    // очистка фона popup
+    f.render_widget(Clear, area);
+
+    let paragraph = Paragraph::new(sql)
+        .block(
+            Block::default()
+                .title("SQL (нажмите 's' чтобы закрыть)")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .wrap(Wrap { trim: false })
+        .alignment(Alignment::Left);
+
+    f.render_widget(paragraph, area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn draw_ui(

@@ -14,7 +14,7 @@ pub use state::AppState;
 pub use tui::CrudMode;
 
 pub use query::{
-    check_config, execute_query, load_config, load_schema, validate_config_path,
+    check_config, execute_query, load_config, load_schema, validate_config_path, QueryOptions,
 };
 
 use anyhow::Result;
@@ -23,6 +23,7 @@ pub async fn run_interactive(cli: Cli) -> Result<()> {
     let mut state = AppState {
         config_path: cli.config.clone(),
         connect_timeout_secs: cli.connect_timeout_secs,
+        max_concurrent_segments: cli.max_concurrent_segments.max(1),
         schema: DatabaseSchema::default(),
         schema_source: String::new(),
     };

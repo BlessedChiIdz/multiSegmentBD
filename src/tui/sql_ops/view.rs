@@ -2,11 +2,10 @@ use crate::schema::{ColumnDef, DatabaseSchema, TableDef};
 use crate::tui::util::{poll_keys, TerminalGuard};
 use anyhow::{bail, Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
-use dialoguer::{Input, theme::ColorfulTheme};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 use std::collections::HashSet;
 
@@ -44,6 +43,24 @@ enum Panel {
     Details,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum PromptTarget {
+    Where,
+    ColumnValue { col_idx: usize },
+}
+
+struct InlinePrompt {
+    label: String,
+    buffer: String,
+    target: PromptTarget,
+}
+
+enum PromptOutcome {
+    Continue,
+    Submit { target: PromptTarget, value: String },
+    Cancel,
+}
+
 pub struct SqlBuildResult {
     pub sql: String,
 }
@@ -64,6 +81,7 @@ pub fn run(schema: &DatabaseSchema, mode: CrudMode) -> Result<Option<SqlBuildRes
     let mut update_col: usize = 0;
     let mut where_clause = String::new();
     let mut focus = Panel::Tables;
+    let mut prompt: Option<InlinePrompt> = None;
 
     reset_for_table(schema, mode, 0, &mut selected_cols, &mut col_values, &mut update_col);
 
@@ -87,6 +105,7 @@ pub fn run(schema: &DatabaseSchema, mode: CrudMode) -> Result<Option<SqlBuildRes
                 &col_values,
                 update_col,
                 &where_clause,
+                prompt.as_ref(),
             );
         })?;
 
@@ -94,10 +113,33 @@ pub fn run(schema: &DatabaseSchema, mode: CrudMode) -> Result<Option<SqlBuildRes
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
+            if let Some(p) = prompt.as_mut() {
+                match handle_prompt_key(key, p)? {
+                    PromptOutcome::Continue => continue,
+                    PromptOutcome::Cancel => {
+                        prompt = None;
+                        continue;
+                    }
+                    PromptOutcome::Submit { target, value } => {
+                        apply_prompt_submit(
+                            target,
+                            value,
+                            &mut where_clause,
+                            &mut col_values,
+                            &mut update_col,
+                        );
+                        prompt = None;
+                        continue;
+                    }
+                }
+            }
+
             match handle_key(
                 key,
                 mode,
                 schema,
+                table,
                 &mut focus,
                 &mut table_idx,
                 &mut table_state,
@@ -106,6 +148,7 @@ pub fn run(schema: &DatabaseSchema, mode: CrudMode) -> Result<Option<SqlBuildRes
                 &mut col_values,
                 &mut update_col,
                 &mut where_clause,
+                &mut prompt,
             )? {
                 KeyAction::Continue => {}
                 KeyAction::Quit => return Ok(None),
@@ -172,10 +215,62 @@ fn sync_detail_state(
     detail_state.select(Some(idx));
 }
 
+fn apply_prompt_submit(
+    target: PromptTarget,
+    value: String,
+    where_clause: &mut String,
+    col_values: &mut Vec<String>,
+    update_col: &mut usize,
+) {
+    match target {
+        PromptTarget::Where => *where_clause = value,
+        PromptTarget::ColumnValue { col_idx } => {
+            if col_idx < col_values.len() {
+                col_values[col_idx] = value;
+                *update_col = col_idx;
+            }
+        }
+    }
+}
+
+fn handle_prompt_key(key: KeyEvent, prompt: &mut InlinePrompt) -> Result<PromptOutcome> {
+    match key.code {
+        KeyCode::Esc => return Ok(PromptOutcome::Cancel),
+        KeyCode::Enter => {
+            return Ok(PromptOutcome::Submit {
+                target: prompt.target.clone(),
+                value: prompt.buffer.trim().to_string(),
+            });
+        }
+        KeyCode::Backspace => {
+            prompt.buffer.pop();
+        }
+        KeyCode::Char(c) if !c.is_control() => {
+            prompt.buffer.push(c);
+        }
+        _ => {}
+    }
+    Ok(PromptOutcome::Continue)
+}
+
+fn open_prompt(
+    prompt: &mut Option<InlinePrompt>,
+    label: impl Into<String>,
+    initial: &str,
+    target: PromptTarget,
+) {
+    *prompt = Some(InlinePrompt {
+        label: label.into(),
+        buffer: initial.to_string(),
+        target,
+    });
+}
+
 fn handle_key(
     key: KeyEvent,
     mode: CrudMode,
     schema: &DatabaseSchema,
+    table: &TableDef,
     focus: &mut Panel,
     table_idx: &mut usize,
     table_state: &mut ListState,
@@ -184,9 +279,9 @@ fn handle_key(
     col_values: &mut Vec<String>,
     update_col: &mut usize,
     where_clause: &mut String,
+    prompt: &mut Option<InlinePrompt>,
 ) -> Result<KeyAction> {
     let tables_len = schema.tables.len();
-    let table = &schema.tables[*table_idx];
     let cols_len = table.columns.len();
 
     match key.code {
@@ -194,7 +289,12 @@ fn handle_key(
         KeyCode::Tab => *focus = toggle_panel(*focus),
         KeyCode::Char('r') => return Ok(KeyAction::Run),
         KeyCode::Char('w') => {
-            *where_clause = prompt_line("WHERE (без слова WHERE, пусто = нет)")?;
+            open_prompt(
+                prompt,
+                "WHERE (без слова WHERE, пусто = нет)",
+                where_clause,
+                PromptTarget::Where,
+            );
             return Ok(KeyAction::Continue);
         }
         KeyCode::Char('e') if matches!(mode, CrudMode::Insert | CrudMode::Update) => {
@@ -206,11 +306,13 @@ fn handle_key(
                 } else {
                     "обязательно"
                 };
-                col_values[ci] =
-                    prompt_line(&format!("Значение для {} ({hint})", col.name))?;
-                if mode == CrudMode::Update {
-                    *update_col = ci;
-                }
+                let initial = col_values.get(ci).map(String::as_str).unwrap_or("");
+                open_prompt(
+                    prompt,
+                    format!("Значение для {} ({hint})", col.name),
+                    initial,
+                    PromptTarget::ColumnValue { col_idx: ci },
+                );
             }
             return Ok(KeyAction::Continue);
         }
@@ -276,12 +378,6 @@ fn toggle_panel(p: Panel) -> Panel {
         Panel::Tables => Panel::Details,
         Panel::Details => Panel::Tables,
     }
-}
-
-fn prompt_line(prompt: &str) -> Result<String> {
-    let theme = ColorfulTheme::default();
-    let s: String = Input::with_theme(&theme).with_prompt(prompt).interact_text()?;
-    Ok(s.trim().to_string())
 }
 
 fn build_sql(
@@ -424,13 +520,20 @@ fn draw(
     col_values: &[String],
     update_col: usize,
     where_clause: &str,
+    prompt: Option<&InlinePrompt>,
 ) {
-    let chunks = Layout::vertical([
+    let mut constraints = vec![
         Constraint::Length(3),
         Constraint::Min(5),
-        Constraint::Length(3),
-    ])
-    .split(f.area());
+    ];
+    if prompt.is_some() {
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Length(3));
+    let chunks = Layout::vertical(constraints).split(f.area());
+
+    let help_idx = if prompt.is_some() { 3 } else { 2 };
+    let prompt_idx = if prompt.is_some() { Some(2) } else { None };
 
     let header = Paragraph::new(format!(
         "Таблица: {} | WHERE: {}",
@@ -472,16 +575,42 @@ fn draw(
         focus == Panel::Details,
     );
 
-    let help = match mode {
-        CrudMode::Select => "Tab — панели | Space — колонка | w — WHERE | r — выполнить | q — назад",
-        CrudMode::Insert => "Tab — панели | e — значение | r — выполнить | q — назад",
-        CrudMode::Update => "Tab — панели | e — SET | w — WHERE | r — выполнить | q — назад",
-        CrudMode::Delete => "Tab — таблицы | w — WHERE | r — выполнить | q — назад",
+    if let (Some(p), Some(idx)) = (prompt, prompt_idx) {
+        draw_inline_prompt(f, chunks[idx], p);
+    }
+
+    let help = if prompt.is_some() {
+        "Enter — применить | Esc — отмена"
+    } else {
+        match mode {
+            CrudMode::Select => {
+                "Tab — панели | Space — колонка | w — WHERE | r — выполнить | q — назад"
+            }
+            CrudMode::Insert => "Tab — панели | e — значение | r — выполнить | q — назад",
+            CrudMode::Update => {
+                "Tab — панели | e — SET | w — WHERE | r — выполнить | q — назад"
+            }
+            CrudMode::Delete => "Tab — таблицы | w — WHERE | r — выполнить | q — назад",
+        }
     };
     f.render_widget(
         Paragraph::new(help).style(Style::new().fg(Color::DarkGray)),
-        chunks[2],
+        chunks[help_idx],
     );
+}
+
+fn draw_inline_prompt(f: &mut Frame, area: Rect, prompt: &InlinePrompt) {
+    f.render_widget(Clear, area);
+    let cursor = if prompt.buffer.is_empty() {
+        "█".to_string()
+    } else {
+        format!("{}█", prompt.buffer)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Magenta))
+        .title(format!(" {} ", prompt.label));
+    f.render_widget(Paragraph::new(cursor).block(block), area);
 }
 
 fn draw_tables(
