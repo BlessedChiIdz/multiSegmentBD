@@ -1,0 +1,29 @@
+{
+  "segments": [
+    {
+      "name": "segment-00",
+      "host": "127.0.0.1",
+      "port": 5432,
+      "database": "mydatabase",
+      "user": "myuser",
+      "password": "mypassword"
+    },
+    {
+      "name": "segment-01",
+      "host": "127.0.0.1",
+      "port": 5433,
+      "database": "mydatabase",
+      "user": "myuser",
+      "password": "mypassword"
+    },
+    {
+      "name": "segment-02",
+      "host": "127.0.0.1",
+      "port": 5434,
+      "database": "mydatabase",
+      "user": "myuser",
+      "password": "mypassword"
+    }
+  ]
+}
+

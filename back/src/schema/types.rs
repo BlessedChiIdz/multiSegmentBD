@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: String,
@@ -11,13 +12,13 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TableDef {
     pub name: String,
     pub columns: Vec<ColumnDef>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DatabaseSchema {
     pub tables: Vec<TableDef>,
 }
