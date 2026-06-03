@@ -63,3 +63,11 @@ cargo run -- --config segments.json --host 127.0.0.1 --port 8080
 ## Конфиг сегментов
 
 Формат `segments.json` без изменений: массив `segments` с полями `name`, `host`, `port`, `database`, `user`, `password` или `password_env`.
+
+## Веб-интерфейс
+
+UI в каталоге `../front` (React + MUI). После запуска API:
+
+```bash
+cd ../front && npm install && npm start
+```
