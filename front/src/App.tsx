@@ -110,10 +110,6 @@ function App() {
     }
   }, [sql, selectedSegments, segments.length, stopOnFirstMatch]);
 
-  const insertTableQuery = (table: TableDef) => {
-    setSql(`SELECT *\nFROM ${quoteIdent(table.name)}\nLIMIT 100;`);
-  };
-
   const insertColumn = (table: TableDef, columnName: string) => {
     const snippet = `${quoteIdent(table.name)}.${quoteIdent(columnName)}`;
     setSql((prev) => (prev.trim() ? `${prev}\n${snippet}` : snippet));
@@ -185,8 +181,8 @@ function App() {
                       schemaSource={schemaSource}
                       loading={schemaLoading}
                       onReload={reloadSchema}
-                      onSelectTable={insertTableQuery}
-                      onSelectColumn={insertColumn}
+                      onSetSql={setSql}
+                      onInsertColumn={insertColumn}
                     />
                   }
                 />

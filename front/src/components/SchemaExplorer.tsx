@@ -8,26 +8,33 @@ import {
   Box,
   CircularProgress,
   IconButton,
+  Menu,
+  MenuItem,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView';
 import { TreeItem } from '@mui/x-tree-view/TreeItem';
+import { useState } from 'react';
 import type { DatabaseSchema, TableDef } from '../types';
+import { buildSelectFirst100 } from '../utils/sql';
+import {
+  TableQueryDialog,
+  type TableQueryMode,
+} from './TableQueryDialog';
 
 interface SchemaExplorerProps {
   schema: DatabaseSchema | null;
   schemaSource: string;
   loading: boolean;
   onReload: () => void;
-  onSelectTable: (table: TableDef) => void;
-  onSelectColumn: (table: TableDef, columnName: string) => void;
+  onSetSql: (sql: string) => void;
+  onInsertColumn: (table: TableDef, columnName: string) => void;
 }
 
 function columnLabel(col: TableDef['columns'][0]): string {
   const nullable = col.is_nullable ? 'NULL' : 'NOT NULL';
-  const len =
-    col.char_max_len != null ? `(${col.char_max_len})` : '';
+  const len = col.char_max_len != null ? `(${col.char_max_len})` : '';
   return `${col.name}: ${col.data_type}${len} ${nullable}`;
 }
 
@@ -36,10 +43,44 @@ export function SchemaExplorer({
   schemaSource,
   loading,
   onReload,
-  onSelectTable,
-  onSelectColumn,
+  onSetSql,
+  onInsertColumn,
 }: SchemaExplorerProps) {
   const tables = schema?.tables ?? [];
+
+  const [menuAnchor, setMenuAnchor] = useState<{
+    mouseX: number;
+    mouseY: number;
+  } | null>(null);
+  const [menuTable, setMenuTable] = useState<TableDef | null>(null);
+  const [queryDialog, setQueryDialog] = useState<{
+    mode: TableQueryMode;
+    table: TableDef;
+  } | null>(null);
+
+  const openTableMenu = (e: React.MouseEvent, table: TableDef) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuTable(table);
+    setMenuAnchor({ mouseX: e.clientX, mouseY: e.clientY });
+  };
+
+  const closeMenu = () => {
+    setMenuAnchor(null);
+    setMenuTable(null);
+  };
+
+  const openQueryDialog = (mode: TableQueryMode) => {
+    if (menuTable) {
+      setQueryDialog({ mode, table: menuTable });
+    }
+    setMenuAnchor(null);
+  };
+
+  const closeQueryDialog = () => {
+    setQueryDialog(null);
+    setMenuTable(null);
+  };
 
   return (
     <Box
@@ -113,9 +154,10 @@ export function SchemaExplorer({
                         gap: 0.5,
                         py: 0.25,
                       }}
+                      onContextMenu={(e) => openTableMenu(e, table)}
                       onDoubleClick={(e) => {
                         e.stopPropagation();
-                        onSelectTable(table);
+                        onSetSql(buildSelectFirst100(table));
                       }}
                     >
                       <TableChartIcon sx={{ fontSize: 16, opacity: 0.7 }} />
@@ -146,7 +188,7 @@ export function SchemaExplorer({
                           }}
                           onDoubleClick={(e) => {
                             e.stopPropagation();
-                            onSelectColumn(table, col.name);
+                            onInsertColumn(table, col.name);
                           }}
                         >
                           {col.is_primary_key ? (
@@ -175,6 +217,38 @@ export function SchemaExplorer({
           </SimpleTreeView>
         )}
       </Box>
+
+      <Menu
+        open={menuAnchor !== null}
+        onClose={closeMenu}
+        anchorReference="anchorPosition"
+        anchorPosition={
+          menuAnchor
+            ? { top: menuAnchor.mouseY, left: menuAnchor.mouseX }
+            : undefined
+        }
+      >
+        <MenuItem onClick={() => openQueryDialog('simple')}>
+          SELECT…
+        </MenuItem>
+        <MenuItem onClick={() => openQueryDialog('first100')}>
+          Выбрать 100 первых…
+        </MenuItem>
+        <MenuItem onClick={() => openQueryDialog('last100')}>
+          Выбрать 100 последних…
+        </MenuItem>
+        <MenuItem onClick={() => openQueryDialog('condition')}>
+          SELECT с условием по столбцу…
+        </MenuItem>
+      </Menu>
+
+      <TableQueryDialog
+        open={queryDialog !== null}
+        mode={queryDialog?.mode ?? null}
+        table={queryDialog?.table ?? menuTable}
+        onClose={closeQueryDialog}
+        onApply={onSetSql}
+      />
     </Box>
   );
 }
