@@ -6,7 +6,27 @@ import type {
   StatusResponse,
 } from '../types';
 
-const API_BASE = process.env.REACT_APP_API_URL ?? '';
+declare global {
+  interface Window {
+    __APP_CONFIG__?: {
+      apiBase?: string;
+    };
+  }
+}
+
+function resolveApiBase(): string {
+  const fromConfig = window.__APP_CONFIG__?.apiBase;
+  if (fromConfig !== undefined && fromConfig !== '') {
+    return fromConfig.replace(/\/$/, '');
+  }
+  const fromEnv = process.env.REACT_APP_API_URL;
+  if (fromEnv) {
+    return fromEnv.replace(/\/$/, '');
+  }
+  return '';
+}
+
+const API_BASE = resolveApiBase();
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
