@@ -1,28 +1,62 @@
 {
-  "segments": [
+  "groups": [
     {
-      "name": "segment-00",
-      "host": "127.0.0.1",
-      "port": 5432,
-      "database": "mydatabase",
-      "user": "myuser",
-      "password": "mypassword"
+      "name": "preprod",
+      "connections": [
+        {
+          "name": "app_db",
+          "host": "127.0.0.1",
+          "port": 5432,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        },
+        {
+          "name": "logs_db",
+          "host": "127.0.0.1",
+          "port": 5433,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        },
+        {
+          "name": "archive_db",
+          "host": "127.0.0.1",
+          "port": 5434,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        }
+      ]
     },
     {
-      "name": "segment-01",
-      "host": "127.0.0.1",
-      "port": 5433,
-      "database": "mydatabase",
-      "user": "myuser",
-      "password": "mypassword"
-    },
-    {
-      "name": "segment-02",
-      "host": "127.0.0.1",
-      "port": 5434,
-      "database": "mydatabase",
-      "user": "myuser",
-      "password": "mypassword"
+      "name": "prod",
+      "connections": [
+        {
+          "name": "app_db",
+          "host": "127.0.0.1",
+          "port": 5435,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        },
+        {
+          "name": "reports_db",
+          "host": "127.0.0.1",
+          "port": 5436,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        },
+        {
+          "name": "testErr",
+          "host": "127.0.0.1",
+          "port": 5437,
+          "database": "mydatabase",
+          "user": "myuser",
+          "password": "mypassword"
+        }
+      ]
     }
   ]
 }

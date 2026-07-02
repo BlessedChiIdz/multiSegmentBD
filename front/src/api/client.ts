@@ -1,8 +1,10 @@
 import type {
+  QueryJobResponse,
   QueryRequest,
-  QueryResponse,
+  QueryStartResponse,
   SchemaResponse,
   SegmentsResponse,
+  SegmentsHealthResponse,
   StatusResponse,
 } from '../types';
 
@@ -49,12 +51,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   getStatus: () => request<StatusResponse>('/api/status'),
   getSegments: () => request<SegmentsResponse>('/api/segments'),
+  getSegmentsHealth: () => request<SegmentsHealthResponse>('/api/segments/health'),
   getSchema: () => request<SchemaResponse>('/api/schema'),
   reloadSchema: () =>
     request<SchemaResponse>('/api/schema/reload', { method: 'POST' }),
   executeQuery: (body: QueryRequest) =>
-    request<QueryResponse>('/api/query', {
+    request<QueryStartResponse>('/api/query', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  getQueryJob: (queryId: string) =>
+    request<QueryJobResponse>(`/api/query/${encodeURIComponent(queryId)}`),
+  cancelQuery: (queryId: string, segments?: string[]) =>
+    request<{ ok: boolean }>(
+      `/api/query/${encodeURIComponent(queryId)}/cancel`,
+      {
+        method: 'POST',
+        body: JSON.stringify(segments ? { segments } : {}),
+      },
+    ),
 };

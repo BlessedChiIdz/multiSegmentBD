@@ -1,4 +1,5 @@
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import StopIcon from '@mui/icons-material/Stop';
 import {
   AppBar,
   Box,
@@ -13,10 +14,19 @@ interface ToolbarProps {
   status: StatusResponse | null;
   connected: boolean;
   running: boolean;
+  autocommit: boolean;
   onRun: () => void;
+  onCancel: () => void;
 }
 
-export function Toolbar({ status, connected, running, onRun }: ToolbarProps) {
+export function Toolbar({
+  status,
+  connected,
+  running,
+  autocommit,
+  onRun,
+  onCancel,
+}: ToolbarProps) {
   return (
     <AppBar
       position="static"
@@ -37,6 +47,23 @@ export function Toolbar({ status, connected, running, onRun }: ToolbarProps) {
         >
           Run
         </Button>
+        {running && (
+          <Button
+            variant="outlined"
+            size="small"
+            color="error"
+            startIcon={<StopIcon />}
+            onClick={onCancel}
+          >
+            Stop all
+          </Button>
+        )}
+        <Chip
+          size="small"
+          label={autocommit ? 'Autocommit' : 'Transaction'}
+          color={autocommit ? 'default' : 'warning'}
+          variant="outlined"
+        />
         <Box sx={{ flex: 1 }} />
         {status && (
           <>

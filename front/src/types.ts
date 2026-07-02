@@ -28,6 +28,39 @@ export interface StatusResponse {
   table_count: number;
 }
 
+export interface ConnectionInfo {
+  id: string;
+  name: string;
+  group: string;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+}
+
+export interface ConnectionGroup {
+  name: string;
+  connections: ConnectionInfo[];
+}
+
+export interface SegmentsResponse {
+  groups: ConnectionGroup[];
+}
+
+export interface SegmentHealthInfo {
+  id?: string;
+  ok: boolean;
+  latency_ms?: number;
+  error?: string;
+}
+
+export interface SegmentsHealthResponse {
+  segments: Record<string, SegmentHealthInfo>;
+  online: number;
+  total: number;
+}
+
+/** @deprecated flat list — use groups */
 export interface SegmentInfo {
   name: string;
   host: string;
@@ -36,14 +69,11 @@ export interface SegmentInfo {
   user: string;
 }
 
-export interface SegmentsResponse {
-  segments: SegmentInfo[];
-}
-
 export interface QueryRequest {
   sql: string;
   segments: string[];
   stop_on_first_match: boolean;
+  autocommit: boolean;
 }
 
 export interface SegmentQueryResult {
@@ -56,6 +86,22 @@ export interface SegmentQueryResult {
   error?: string;
 }
 
-export interface QueryResponse {
+export interface QueryStartResponse {
+  query_id: string;
+}
+
+export type SegmentRunStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'cancelled'
+  | 'error';
+
+export type QueryJobStatus = 'running' | 'completed' | 'cancelled';
+
+export interface QueryJobResponse {
+  query_id: string;
+  status: QueryJobStatus;
+  segments: Record<string, SegmentRunStatus>;
   results: SegmentQueryResult[];
 }

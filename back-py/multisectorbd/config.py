@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +11,17 @@ class ConfigError(Exception):
     pass
 
 
+def connection_id(group: str, label: str) -> str:
+    if group:
+        return f"{group}/{label}"
+    return label
+
+
 @dataclass
 class Segment:
     name: str
+    group: str
+    label: str
     host: str
     port: int
     database: str
@@ -22,9 +30,17 @@ class Segment:
     password_env: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Segment:
+    def from_connection(
+        cls,
+        group: str,
+        data: dict[str, Any],
+    ) -> Segment:
+        label = str(data["name"]).strip()
+        group_name = group.strip()
         return cls(
-            name=data["name"],
+            name=connection_id(group_name, label),
+            group=group_name,
+            label=label,
             host=data["host"],
             port=int(data.get("port", 5432)),
             database=data["database"],
@@ -49,8 +65,15 @@ class Segment:
 
 
 @dataclass
+class ConnectionGroup:
+    name: str
+    connections: list[Segment] = field(default_factory=list)
+
+
+@dataclass
 class ConfigFile:
     segments: list[Segment]
+    groups: list[ConnectionGroup]
 
     def validate(self) -> None:
         if not self.segments:
@@ -86,6 +109,51 @@ class ConfigFile:
                 seg.resolve_password()
 
 
+def _load_groups(data: dict[str, Any]) -> ConfigFile:
+    segments: list[Segment] = []
+    groups: list[ConnectionGroup] = []
+
+    for group_data in data.get("groups", []):
+        group_name = str(group_data.get("name", "")).strip()
+        if not group_name:
+            raise ConfigError("у группы задано пустое имя (name)")
+
+        raw_connections = (
+            group_data.get("connections")
+            or group_data.get("databases")
+            or []
+        )
+        if not raw_connections:
+            raise ConfigError(f"группа {group_name}: нет подключений")
+
+        group_segments: list[Segment] = []
+        labels: set[str] = set()
+        for conn_data in raw_connections:
+            label = str(conn_data.get("name", "")).strip()
+            if not label:
+                raise ConfigError(f"группа {group_name}: пустое имя подключения")
+            if label in labels:
+                raise ConfigError(
+                    f"группа {group_name}: дублирующееся имя подключения {label}"
+                )
+            labels.add(label)
+            seg = Segment.from_connection(group_name, conn_data)
+            group_segments.append(seg)
+            segments.append(seg)
+
+        groups.append(ConnectionGroup(name=group_name, connections=group_segments))
+
+    return ConfigFile(segments=segments, groups=groups)
+
+
+def _load_legacy_segments(data: dict[str, Any]) -> ConfigFile:
+    segments = [
+        Segment.from_connection("", item) for item in data.get("segments", [])
+    ]
+    groups = [ConnectionGroup(name="Connections", connections=segments)]
+    return ConfigFile(segments=segments, groups=groups)
+
+
 def load_config(path: Path) -> ConfigFile:
     try:
         text = path.read_text(encoding="utf-8")
@@ -97,8 +165,9 @@ def load_config(path: Path) -> ConfigFile:
     except json.JSONDecodeError as exc:
         raise ConfigError("разбор JSON конфигурации") from exc
 
-    segments = [Segment.from_dict(item) for item in data.get("segments", [])]
-    return ConfigFile(segments=segments)
+    if "groups" in data:
+        return _load_groups(data)
+    return _load_legacy_segments(data)
 
 
 def validate_config_path(path: Path) -> ConfigFile:

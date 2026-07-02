@@ -26,4 +26,13 @@ WHERE c.table_schema = 'public'
       WHERE table_schema = 'public'
         AND table_type = 'BASE TABLE'
   )
+  -- не показывать партиции (ppac_account_pool_logs_2026_05_24 и т.п.)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_inherits inh
+      JOIN pg_catalog.pg_class child ON child.oid = inh.inhrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = child.relnamespace
+      WHERE ns.nspname = c.table_schema
+        AND child.relname = c.table_name
+  )
 ORDER BY c.table_name, c.ordinal_position;

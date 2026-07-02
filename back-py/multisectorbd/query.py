@@ -8,6 +8,7 @@ from typing import Any
 from multisectorbd.config import ConfigFile, Segment, load_config, validate_config_path
 from multisectorbd.db_runner import run_on_segment
 from multisectorbd.schema_fetch import load_schema
+from multisectorbd.sql_policy import SqlPolicyError, validate_select_only
 from multisectorbd.state import AppState
 
 
@@ -18,6 +19,7 @@ class QueryError(Exception):
 @dataclass
 class QueryOptions:
     stop_on_first_match: bool = False
+    autocommit: bool = True
 
 
 def check_config(state: AppState) -> ConfigFile:
@@ -35,15 +37,42 @@ def filter_segments(segments: list[Segment], names: list[str]) -> list[Segment]:
     return filtered
 
 
+def _ensure_select_only(sql: str) -> str:
+    try:
+        validate_select_only(sql)
+    except SqlPolicyError as exc:
+        raise QueryError(str(exc)) from exc
+    return sql.strip()
+
+
+def start_query(
+    state: AppState,
+    sql: str,
+    segment_filter: list[str],
+    options: QueryOptions,
+) -> str:
+    from multisectorbd.query_jobs import query_job_manager
+
+    sql = _ensure_select_only(sql)
+
+    config = load_config(state.config_path)
+    segments = filter_segments(config.segments, segment_filter)
+    return query_job_manager.start(
+        segments,
+        sql,
+        state.connect_timeout,
+        state.max_concurrent_segments,
+        options,
+    )
+
+
 def execute_query(
     state: AppState,
     sql: str,
     segment_filter: list[str],
     options: QueryOptions,
 ) -> list[dict[str, Any]]:
-    sql = sql.strip()
-    if not sql:
-        raise QueryError("Пустой SQL")
+    sql = _ensure_select_only(sql)
 
     config = load_config(state.config_path)
     segments = filter_segments(config.segments, segment_filter)
@@ -70,9 +99,10 @@ def _run_segment_with_timeout(
     seg: Segment,
     sql: str,
     timeout_secs: float,
+    autocommit: bool,
 ) -> dict[str, Any]:
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(run_on_segment, seg, sql)
+        future = pool.submit(run_on_segment, seg, sql, autocommit=autocommit)
         try:
             return future.result(timeout=timeout_secs)
         except FuturesTimeoutError:
@@ -102,7 +132,9 @@ def run_on_all_segments(
             if options.stop_on_first_match and found.is_set():
                 return None
 
-            value = _run_segment_with_timeout(seg, sql, connect_timeout_secs)
+            value = _run_segment_with_timeout(
+                seg, sql, connect_timeout_secs, options.autocommit
+            )
             if options.stop_on_first_match and _segment_has_rows(value):
                 found.set()
             return value

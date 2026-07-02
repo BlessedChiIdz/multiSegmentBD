@@ -23,7 +23,7 @@ export function SqlEditor({ value, onChange }: SqlEditorProps) {
         fullWidth
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="SELECT * FROM ..."
+        placeholder="SELECT * FROM ...  (только SELECT)"
         variant="standard"
         InputProps={{
           disableUnderline: true,
