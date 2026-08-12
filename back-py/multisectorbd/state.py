@@ -5,12 +5,16 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from multisectorbd.credential_vault import CredentialVault
+
 
 @dataclass
 class AppState:
     config_path: Path
+    credentials_path: Path
     connect_timeout_secs: int
     max_concurrent_segments: int
+    vault: CredentialVault = field(repr=False)
     schema: dict[str, Any] = field(default_factory=lambda: {"tables": []})
     schema_source: str = ""
     lock: RLock = field(default_factory=RLock, repr=False)

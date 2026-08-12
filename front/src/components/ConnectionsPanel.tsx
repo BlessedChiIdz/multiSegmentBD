@@ -4,6 +4,7 @@ import FolderIcon from '@mui/icons-material/Folder';
 import LinkIcon from '@mui/icons-material/Link';
 import LinkOffIcon from '@mui/icons-material/LinkOff';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import SettingsIcon from '@mui/icons-material/Settings';
 import StopIcon from '@mui/icons-material/Stop';
 import StorageIcon from '@mui/icons-material/Storage';
 import {
@@ -13,7 +14,6 @@ import {
   CircularProgress,
   FormControlLabel,
   IconButton,
-  Switch,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -29,16 +29,15 @@ import type {
 interface ConnectionsPanelProps {
   groups: ConnectionGroup[];
   selected: string[];
-  autocommit: boolean;
   stopOnFirstMatch: boolean;
   segmentRunStatus: Record<string, SegmentRunStatus>;
   segmentHealth: Record<string, SegmentHealthInfo>;
   healthChecking: boolean;
   onSelectedChange: (ids: string[]) => void;
-  onAutocommitChange: (value: boolean) => void;
   onStopOnFirstMatchChange: (value: boolean) => void;
   onCancelSegment: (id: string) => void;
   onRefreshHealth: () => void;
+  onOpenSettings: (id: string) => void;
 }
 
 function allConnections(groups: ConnectionGroup[]): ConnectionInfo[] {
@@ -138,6 +137,8 @@ function connectionLabel(
   healthChecking: boolean,
   onToggle: () => void,
   onCancel: () => void,
+  onSettings: () => void,
+  alert = false,
 ) {
   return (
     <Box
@@ -149,6 +150,16 @@ function connectionLabel(
         opacity: active ? 1 : 0.55,
         width: '100%',
         pr: 0.5,
+        pl: alert ? 0.75 : 0,
+        borderLeft: alert ? 3 : 0,
+        borderColor: alert ? 'error.main' : 'transparent',
+        borderRadius: alert ? 0.5 : 0,
+        ...(alert && {
+          bgcolor: (theme) =>
+            theme.palette.mode === 'dark'
+              ? 'rgba(211, 47, 47, 0.12)'
+              : 'rgba(211, 47, 47, 0.08)',
+        }),
       }}
       onClick={(e) => {
         e.stopPropagation();
@@ -164,13 +175,33 @@ function connectionLabel(
       />
       {reachabilityIcon(conn.id, health, healthChecking)}
       <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="body2" noWrap>
+        <Typography
+          variant="body2"
+          noWrap
+          sx={alert ? { color: 'error.main', fontWeight: 600 } : undefined}
+        >
           {conn.database}
         </Typography>
-        <Typography variant="caption" color="text.secondary" noWrap>
+        <Typography
+          variant="caption"
+          noWrap
+          sx={alert ? { color: 'error.light' } : { color: 'text.secondary' }}
+        >
           {conn.name} · {conn.user}@{conn.host}:{conn.port}
         </Typography>
       </Box>
+      <Tooltip title="Настройки подключения">
+        <IconButton
+          size="small"
+          onClick={(e) => {
+            e.stopPropagation();
+            onSettings();
+          }}
+          sx={{ p: 0.25, mt: 0.1 }}
+        >
+          <SettingsIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </Tooltip>
       {statusChip(runStatus, onCancel)}
     </Box>
   );
@@ -179,16 +210,15 @@ function connectionLabel(
 export function ConnectionsPanel({
   groups,
   selected,
-  autocommit,
   stopOnFirstMatch,
   segmentRunStatus,
   segmentHealth,
   healthChecking,
   onSelectedChange,
-  onAutocommitChange,
   onStopOnFirstMatchChange,
   onCancelSegment,
   onRefreshHealth,
+  onOpenSettings,
 }: ConnectionsPanelProps) {
   const connections = allConnections(groups);
   const allIds = connections.map((c) => c.id);
@@ -339,6 +369,7 @@ export function ConnectionsPanel({
             >
               {groups.map((group) => {
                 const gState = groupCheckboxState(group);
+                const isAlert = Boolean(group.alert);
                 return (
                   <TreeItem
                     key={group.name}
@@ -350,6 +381,14 @@ export function ConnectionsPanel({
                           alignItems: 'center',
                           gap: 0.5,
                           py: 0.25,
+                          px: isAlert ? 0.5 : 0,
+                          borderRadius: isAlert ? 0.5 : 0,
+                          ...(isAlert && {
+                            bgcolor: (theme) =>
+                              theme.palette.mode === 'dark'
+                                ? 'rgba(211, 47, 47, 0.16)'
+                                : 'rgba(211, 47, 47, 0.1)',
+                          }),
                         }}
                         onClick={(e) => {
                           e.stopPropagation();
@@ -364,11 +403,35 @@ export function ConnectionsPanel({
                           disableRipple
                           sx={{ p: 0.25 }}
                         />
-                        <FolderIcon sx={{ fontSize: 16, color: 'warning.main' }} />
-                        <Typography variant="body2" fontWeight={600}>
+                        <FolderIcon
+                          sx={{
+                            fontSize: 16,
+                            color: isAlert ? 'error.main' : 'warning.main',
+                          }}
+                        />
+                        <Typography
+                          variant="body2"
+                          fontWeight={600}
+                          sx={isAlert ? { color: 'error.main' } : undefined}
+                        >
                           {group.name}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary">
+                        {isAlert ? (
+                          <Chip
+                            size="small"
+                            label="PROD"
+                            color="error"
+                            sx={{ height: 18, fontSize: '0.65rem' }}
+                          />
+                        ) : null}
+                        <Typography
+                          variant="caption"
+                          sx={
+                            isAlert
+                              ? { color: 'error.light' }
+                              : { color: 'text.secondary' }
+                          }
+                        >
                           ({group.connections.length})
                         </Typography>
                       </Box>
@@ -387,6 +450,8 @@ export function ConnectionsPanel({
                           healthChecking,
                           () => toggleOne(conn.id),
                           () => onCancelSegment(conn.id),
+                          () => onOpenSettings(conn.id),
+                          isAlert,
                         )}
                       />
                     ))}
@@ -409,20 +474,7 @@ export function ConnectionsPanel({
           gap: 0.5,
         }}
       >
-        <FormControlLabel
-          control={
-            <Switch
-              size="small"
-              checked={autocommit}
-              onChange={(_, v) => onAutocommitChange(v)}
-            />
-          }
-          label={
-            <Typography variant="caption">
-              Autocommit {autocommit ? 'ON' : 'OFF (BEGIN…COMMIT)'}
-            </Typography>
-          }
-        />
+        {/* Autocommit toggle скрыт: у нас токо SELECT */}
         <FormControlLabel
           control={
             <Checkbox

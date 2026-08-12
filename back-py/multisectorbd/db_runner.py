@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import psycopg2
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Engine
-from sqlalchemy.pool import NullPool
 
 from multisectorbd.config import Segment
 from multisectorbd.row_json import row_to_values
@@ -14,6 +15,10 @@ from multisectorbd.sql_policy import validate_select_only
 
 CancelCheck = Callable[[], bool]
 CancelRegister = Callable[[str, Callable[[], None] | None], None]
+
+# Держим соединение в пуле; если запросов нет — закрываем через POOL_IDLE_SECS.
+POOL_IDLE_SECS = 600
+POOL_RECYCLE_SECS = 600
 
 
 def _is_read_query(sql: str) -> bool:
@@ -50,13 +55,19 @@ def _execute(conn, sql: str, is_query: bool) -> dict:
     }
 
 
-def _psycopg2_connect(seg: Segment):
+def _segment_password(seg: Segment, password_override: str | None = None) -> str:
+    if password_override is not None:
+        return password_override
+    return seg.resolve_password()
+
+
+def _psycopg2_connect(seg: Segment, password_override: str | None = None):
     return psycopg2.connect(
         host=seg.host,
         port=seg.port,
         dbname=seg.database,
         user=seg.user,
-        password=seg.resolve_password(),
+        password=_segment_password(seg, password_override),
     )
 
 
@@ -152,28 +163,120 @@ def _unregister_cancel(segment: str, on_cancel_register: CancelRegister | None) 
         on_cancel_register(segment, None)
 
 
-def _segment_url(seg: Segment) -> URL:
+def _segment_url(seg: Segment, password_override: str | None = None) -> URL:
     return URL.create(
         drivername="postgresql+psycopg2",
         username=seg.user,
-        password=seg.resolve_password(),
+        password=_segment_password(seg, password_override),
         host=seg.host,
         port=seg.port,
         database=seg.database,
     )
 
 
-def _make_engine(seg: Segment) -> Engine:
+def _make_engine(seg: Segment, password_override: str | None = None) -> Engine:
     return create_engine(
-        _segment_url(seg),
-        poolclass=NullPool,
+        _segment_url(seg, password_override),
+        pool_size=1,
+        max_overflow=3,
+        pool_recycle=POOL_RECYCLE_SECS,
         pool_pre_ping=True,
     )
 
 
-def ping_segment(seg: Segment) -> dict:
+@dataclass
+class _CachedEngine:
+    engine: Engine
+    segment_name: str
+    last_used: float
+
+
+class _EngineCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._engines: dict[str, _CachedEngine] = {}
+
+    def _cache_key(self, seg: Segment, password_override: str | None) -> str:
+        password = _segment_password(seg, password_override)
+        return f"{seg.name}\0{password}"
+
+    def _evict_idle(self, now: float) -> None:
+        stale = [
+            key
+            for key, cached in self._engines.items()
+            if now - cached.last_used > POOL_IDLE_SECS
+        ]
+        for key in stale:
+            cached = self._engines.pop(key)
+            try:
+                cached.engine.dispose()
+            except Exception:
+                pass
+
+    def get_engine(self, seg: Segment, password_override: str | None = None) -> Engine:
+        key = self._cache_key(seg, password_override)
+        now = time.monotonic()
+        with self._lock:
+            self._evict_idle(now)
+            cached = self._engines.get(key)
+            if cached is not None:
+                return cached.engine
+            engine = _make_engine(seg, password_override)
+            self._engines[key] = _CachedEngine(
+                engine=engine,
+                segment_name=seg.name,
+                last_used=now,
+            )
+            return engine
+
+    def touch(self, seg: Segment, password_override: str | None = None) -> None:
+        key = self._cache_key(seg, password_override)
+        now = time.monotonic()
+        with self._lock:
+            cached = self._engines.get(key)
+            if cached is not None:
+                cached.last_used = now
+
+    def invalidate_segment(self, segment_name: str) -> None:
+        with self._lock:
+            stale = [
+                key
+                for key, cached in self._engines.items()
+                if cached.segment_name == segment_name
+            ]
+            for key in stale:
+                cached = self._engines.pop(key)
+                try:
+                    cached.engine.dispose()
+                except Exception:
+                    pass
+
+    def dispose_all(self) -> None:
+        with self._lock:
+            for cached in self._engines.values():
+                try:
+                    cached.engine.dispose()
+                except Exception:
+                    pass
+            self._engines.clear()
+
+
+_engine_cache = _EngineCache()
+
+
+def invalidate_segment_engines(segment_name: str) -> None:
+    """Закрыть закэшированные пулы после смены пароля или настроек."""
+    _engine_cache.invalidate_segment(segment_name)
+
+
+def dispose_all_segment_engines() -> None:
+    """Закрыть все пулы (например, при блокировке хранилища паролей)."""
+    _engine_cache.dispose_all()
+
+
+def ping_segment(seg: Segment, *, password_override: str | None = None) -> dict:
     started = time.perf_counter()
-    engine = _make_engine(seg)
+    engine = _engine_cache.get_engine(seg, password_override)
     try:
         with engine.connect() as conn:
             conn = conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -185,13 +288,14 @@ def ping_segment(seg: Segment) -> dict:
             "latency_ms": latency_ms,
         }
     except Exception as exc:
+        _engine_cache.invalidate_segment(seg.name)
         return {
             "id": seg.name,
             "ok": False,
             "error": str(exc),
         }
     finally:
-        engine.dispose()
+        _engine_cache.touch(seg, password_override)
 
 
 def run_on_segment(
@@ -221,7 +325,7 @@ def run_on_segment(
             "error": str(exc),
         }
 
-    engine = _make_engine(seg)
+    engine = _engine_cache.get_engine(seg)
     try:
         is_query = _is_read_query(sql)
 
@@ -264,10 +368,12 @@ def run_on_segment(
             err = "отменено"
         elif "cancel" in err.lower() or "отмен" in err.lower():
             err = "отменено"
+        else:
+            _engine_cache.invalidate_segment(seg.name)
         return {
             "segment": seg_label,
             "ok": False,
             "error": err,
         }
     finally:
-        engine.dispose()
+        _engine_cache.touch(seg)

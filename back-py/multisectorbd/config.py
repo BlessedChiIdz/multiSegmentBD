@@ -4,7 +4,21 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from multisectorbd.credential_vault import CredentialVault
+
+_active_vault: CredentialVault | None = None
+
+
+def set_password_vault(vault: CredentialVault | None) -> None:
+    global _active_vault
+    _active_vault = vault
+
+
+def get_password_vault() -> CredentialVault | None:
+    return _active_vault
 
 
 class ConfigError(Exception):
@@ -49,6 +63,9 @@ class Segment:
             password_env=data.get("password_env"),
         )
 
+    def uses_vault(self) -> bool:
+        return self.password is None and self.password_env is None
+
     def resolve_password(self) -> str:
         if self.password is not None:
             return self.password
@@ -59,8 +76,15 @@ class Segment:
                     f"сегмент {self.name}: переменная окружения {self.password_env} не задана"
                 )
             return value
+
+        vault = get_password_vault()
+        if vault is not None and vault.is_unlocked:
+            stored = vault.get_password(self.name)
+            if stored is not None:
+                return stored
+
         raise ConfigError(
-            f"сегмент {self.name}: укажите password или password_env"
+            f"сегмент {self.name}: пароль не задан — разблокируйте хранилище в интерфейсе"
         )
 
 
@@ -68,6 +92,7 @@ class Segment:
 class ConnectionGroup:
     name: str
     connections: list[Segment] = field(default_factory=list)
+    alert: bool = False
 
 
 @dataclass
@@ -99,14 +124,27 @@ class ConfigFile:
 
             has_password = seg.password is not None
             has_password_env = seg.password_env is not None
-            if not has_password and not has_password_env:
-                raise ConfigError(f"сегмент {name}: укажите password или password_env")
             if has_password and has_password_env:
                 raise ConfigError(
                     f"сегмент {name}: заданы и password, и password_env — оставьте один вариант"
                 )
             if has_password_env:
                 seg.resolve_password()
+
+            vault = get_password_vault()
+            if seg.uses_vault() and vault is not None and vault.is_unlocked:
+                if vault.get_password(name) is None:
+                    raise ConfigError(
+                        f"сегмент {name}: пароль не найден в хранилище"
+                    )
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
 
 
 def _load_groups(data: dict[str, Any]) -> ConfigFile:
@@ -141,7 +179,13 @@ def _load_groups(data: dict[str, Any]) -> ConfigFile:
             group_segments.append(seg)
             segments.append(seg)
 
-        groups.append(ConnectionGroup(name=group_name, connections=group_segments))
+        groups.append(
+            ConnectionGroup(
+                name=group_name,
+                connections=group_segments,
+                alert=_parse_bool(group_data.get("alert", False)),
+            )
+        )
 
     return ConfigFile(segments=segments, groups=groups)
 
@@ -168,6 +212,47 @@ def load_config(path: Path) -> ConfigFile:
     if "groups" in data:
         return _load_groups(data)
     return _load_legacy_segments(data)
+
+
+def find_segment(config: ConfigFile, segment_id: str) -> Segment:
+    for seg in config.segments:
+        if seg.name == segment_id:
+            return seg
+    raise ConfigError(f"подключение не найдено: {segment_id}")
+
+
+def segment_password_info(seg: Segment) -> dict[str, Any]:
+    if seg.password is not None:
+        return {
+            "source": "inline",
+            "configured": True,
+            "can_edit": False,
+            "hint": "пароль задан в segments.json",
+        }
+
+    if seg.password_env is not None:
+        configured = os.environ.get(seg.password_env) is not None
+        return {
+            "source": "env",
+            "configured": configured,
+            "can_edit": False,
+            "env_var": seg.password_env,
+            "hint": f"пароль из переменной окружения {seg.password_env}",
+        }
+
+    vault = get_password_vault()
+    unlocked = vault is not None and vault.is_unlocked
+    stored = unlocked and vault.get_password(seg.name) is not None
+    return {
+        "source": "vault",
+        "configured": stored,
+        "can_edit": unlocked,
+        "hint": (
+            "пароль хранится в зашифрованном файле credentials.enc"
+            if unlocked
+            else "разблокируйте хранилище паролей"
+        ),
+    }
 
 
 def validate_config_path(path: Path) -> ConfigFile:

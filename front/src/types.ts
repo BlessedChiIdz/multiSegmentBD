@@ -1,3 +1,41 @@
+export interface CredentialsStatusResponse {
+  store_exists: boolean;
+  unlocked: boolean;
+  needs_setup: boolean;
+  vault_segments: string[];
+  missing: string[];
+  credentials_path: string;
+}
+
+export interface CredentialsUnlockResponse {
+  ok: boolean;
+  unlocked: boolean;
+  missing: string[];
+}
+
+export type PasswordSource = 'vault' | 'inline' | 'env';
+
+export interface ConnectionSettingsResponse {
+  id: string;
+  name: string;
+  group: string;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password_source: PasswordSource;
+  password_configured: boolean;
+  can_edit_password: boolean;
+  password_hint?: string;
+  password_env?: string;
+}
+
+export interface ConnectionTestResponse {
+  ok: boolean;
+  latency_ms?: number;
+  error?: string;
+}
+
 export interface ColumnDef {
   name: string;
   data_type: string;
@@ -40,6 +78,7 @@ export interface ConnectionInfo {
 
 export interface ConnectionGroup {
   name: string;
+  alert?: boolean;
   connections: ConnectionInfo[];
 }
 

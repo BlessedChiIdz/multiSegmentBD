@@ -5,23 +5,73 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request
 
-from multisectorbd.config import ConfigError, validate_config_path
+from multisectorbd.config import (
+    ConfigError,
+    find_segment,
+    segment_password_info,
+    set_password_vault,
+    validate_config_path,
+)
+from multisectorbd.credential_vault import CredentialVault, CredentialVaultError
+from multisectorbd.db_runner import (
+    dispose_all_segment_engines,
+    invalidate_segment_engines,
+    ping_segment,
+)
 from multisectorbd.query import QueryError, QueryOptions, check_config, load_schema, start_query
 from multisectorbd.query_jobs import QueryJobError, query_job_manager
 from multisectorbd.schema_fetch import SchemaError
 from multisectorbd.segment_health import check_all_segments
 from multisectorbd.state import AppState
 
+DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
 
-def create_app(state: AppState) -> Flask:
+
+class CredentialsLockedError(Exception):
+    def __init__(self, missing: list[str]) -> None:
+        self.missing = missing
+        super().__init__("требуется разблокировка хранилища паролей")
+
+
+def _require_credentials(s: AppState, config) -> None:
+    missing = s.vault.missing_for_segments(config.segments)
+    if missing:
+        raise CredentialsLockedError(missing)
+
+
+def _credentials_error_response(exc: CredentialsLockedError):
+    return (
+        jsonify(
+            {
+                "error": str(exc),
+                "code": "credentials_locked",
+                "missing": exc.missing,
+            }
+        ),
+        403,
+    )
+
+
+def create_app(
+    state: AppState,
+    *,
+    cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS,
+) -> Flask:
     app = Flask(__name__)
     app.config["APP_STATE"] = state
+    allowed_origins = set(cors_origins)
 
     @app.after_request
     def add_cors_headers(response):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        origin = request.headers.get("Origin")
+        if origin and origin in allowed_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         return response
 
     @app.route("/health", methods=["GET"])
@@ -42,6 +92,198 @@ def create_app(state: AppState) -> Flask:
                 }
             )
 
+    @app.route("/api/credentials/status", methods=["GET"])
+    def credentials_status():
+        s: AppState = app.config["APP_STATE"]
+        try:
+            config = validate_config_path(s.config_path)
+        except ConfigError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(s.vault.status_payload(config.segments))
+
+    @app.route("/api/credentials/unlock", methods=["POST", "OPTIONS"])
+    def credentials_unlock():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        body = request.get_json(silent=True) or {}
+        master_password = str(body.get("master_password", ""))
+
+        try:
+            s.vault.unlock(master_password)
+            config = validate_config_path(s.config_path)
+        except (CredentialVaultError, ConfigError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        missing = s.vault.missing_for_segments(config.segments)
+        return jsonify(
+            {
+                "ok": True,
+                "unlocked": True,
+                "missing": missing,
+            }
+        )
+
+    @app.route("/api/credentials/setup", methods=["POST", "OPTIONS"])
+    def credentials_setup():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        body = request.get_json(silent=True) or {}
+        master_password = str(body.get("master_password", ""))
+        raw_passwords = body.get("passwords") or {}
+        if not isinstance(raw_passwords, dict):
+            return jsonify({"error": "passwords должен быть объектом"}), 400
+
+        passwords = {str(key): str(value) for key, value in raw_passwords.items()}
+
+        try:
+            config = validate_config_path(s.config_path)
+            required = s.vault.vault_segment_ids(config.segments)
+            for segment_id in required:
+                if not passwords.get(segment_id):
+                    return (
+                        jsonify({"error": f"не указан пароль для {segment_id}"}),
+                        400,
+                    )
+            s.vault.setup(master_password, passwords)
+        except (CredentialVaultError, ConfigError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        return jsonify({"ok": True, "unlocked": True, "missing": []})
+
+    @app.route("/api/credentials/save", methods=["POST", "OPTIONS"])
+    def credentials_save():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        body = request.get_json(silent=True) or {}
+        master_password = str(body.get("master_password", ""))
+        raw_passwords = body.get("passwords") or {}
+        if not isinstance(raw_passwords, dict):
+            return jsonify({"error": "passwords должен быть объектом"}), 400
+
+        passwords = {str(key): str(value) for key, value in raw_passwords.items() if value}
+        if not passwords:
+            return jsonify({"error": "нет паролей для сохранения"}), 400
+
+        try:
+            if s.vault.is_unlocked:
+                s.vault.save_passwords(passwords, master_password or None)
+            else:
+                s.vault.setup(master_password, passwords)
+            config = validate_config_path(s.config_path)
+        except (CredentialVaultError, ConfigError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        missing = s.vault.missing_for_segments(config.segments)
+        return jsonify({"ok": True, "unlocked": True, "missing": missing})
+
+    @app.route("/api/credentials/lock", methods=["POST", "OPTIONS"])
+    def credentials_lock():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        s.vault.lock()
+        dispose_all_segment_engines()
+        return jsonify({"ok": True, "unlocked": False})
+
+    @app.route("/api/connections/<path:connection_id>/settings", methods=["GET"])
+    def connection_settings(connection_id: str):
+        s: AppState = app.config["APP_STATE"]
+        try:
+            config = validate_config_path(s.config_path)
+            seg = find_segment(config, connection_id)
+        except ConfigError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+        pwd = segment_password_info(seg)
+        return jsonify(
+            {
+                "id": seg.name,
+                "name": seg.label,
+                "group": seg.group,
+                "host": seg.host,
+                "port": seg.port,
+                "database": seg.database,
+                "user": seg.user,
+                "password_source": pwd["source"],
+                "password_configured": pwd["configured"],
+                "can_edit_password": pwd["can_edit"],
+                "password_hint": pwd.get("hint"),
+                "password_env": pwd.get("env_var"),
+            }
+        )
+
+    @app.route(
+        "/api/connections/<path:connection_id>/password",
+        methods=["POST", "OPTIONS"],
+    )
+    def connection_password(connection_id: str):
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        body = request.get_json(silent=True) or {}
+        password = str(body.get("password", ""))
+
+        try:
+            config = validate_config_path(s.config_path)
+            seg = find_segment(config, connection_id)
+            pwd = segment_password_info(seg)
+            if not pwd["can_edit"]:
+                return jsonify({"error": "пароль этого подключения нельзя изменить здесь"}), 400
+            if not password:
+                return jsonify({"error": "пароль не может быть пустым"}), 400
+            if not s.vault.is_unlocked:
+                return jsonify({"error": "хранилище паролей заблокировано"}), 403
+
+            s.vault.save_passwords({seg.name: password})
+            invalidate_segment_engines(seg.name)
+        except (ConfigError, CredentialVaultError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        return jsonify({"ok": True, "password_configured": True})
+
+    @app.route(
+        "/api/connections/<path:connection_id>/test",
+        methods=["POST", "OPTIONS"],
+    )
+    def connection_test(connection_id: str):
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        s: AppState = app.config["APP_STATE"]
+        body = request.get_json(silent=True) or {}
+        password_override = body.get("password")
+        if password_override is not None:
+            password_override = str(password_override)
+
+        try:
+            config = validate_config_path(s.config_path)
+            seg = find_segment(config, connection_id)
+            if password_override:
+                result = ping_segment(seg, password_override=password_override)
+            else:
+                _require_credentials(s, config)
+                result = ping_segment(seg)
+        except CredentialsLockedError as exc:
+            return _credentials_error_response(exc)
+        except ConfigError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+        return jsonify(
+            {
+                "ok": result.get("ok", False),
+                "latency_ms": result.get("latency_ms"),
+                "error": result.get("error"),
+            }
+        )
+
     @app.route("/api/segments", methods=["GET"])
     def list_segments():
         s: AppState = app.config["APP_STATE"]
@@ -52,6 +294,7 @@ def create_app(state: AppState) -> Flask:
         groups = [
             {
                 "name": group.name,
+                "alert": group.alert,
                 "connections": [
                     {
                         "id": seg.name,
@@ -74,8 +317,11 @@ def create_app(state: AppState) -> Flask:
         s: AppState = app.config["APP_STATE"]
         try:
             config = validate_config_path(s.config_path)
+            _require_credentials(s, config)
         except ConfigError as exc:
             return jsonify({"error": str(exc)}), 500
+        except CredentialsLockedError as exc:
+            return _credentials_error_response(exc)
 
         segments_map = check_all_segments(
             config.segments,
@@ -106,7 +352,10 @@ def create_app(state: AppState) -> Flask:
         with s.lock:
             try:
                 config = validate_config_path(s.config_path)
+                _require_credentials(s, config)
                 schema, source = load_schema(s, config)
+            except CredentialsLockedError as exc:
+                return _credentials_error_response(exc)
             except (ConfigError, SchemaError) as exc:
                 return jsonify({"error": str(exc)}), 500
             s.schema = schema
@@ -128,6 +377,8 @@ def create_app(state: AppState) -> Flask:
 
         s: AppState = app.config["APP_STATE"]
         try:
+            config = validate_config_path(s.config_path)
+            _require_credentials(s, config)
             query_id = start_query(
                 s,
                 sql,
@@ -137,6 +388,8 @@ def create_app(state: AppState) -> Flask:
                     autocommit=autocommit,
                 ),
             )
+        except CredentialsLockedError as exc:
+            return _credentials_error_response(exc)
         except QueryError as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -172,22 +425,40 @@ def create_app(state: AppState) -> Flask:
 def run_server(
     *,
     config: Path,
+    credentials: Path | None,
     connect_timeout_secs: int,
     max_concurrent_segments: int,
     host: str,
     port: int,
+    cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS,
 ) -> None:
+    credentials_path = credentials or (config.parent / "credentials.enc")
+    vault = CredentialVault(credentials_path)
     state = AppState(
         config_path=config,
+        credentials_path=credentials_path,
         connect_timeout_secs=max(1, connect_timeout_secs),
         max_concurrent_segments=max(1, max_concurrent_segments),
+        vault=vault,
     )
+    set_password_vault(vault)
 
     config_data = check_config(state)
-    schema, source = load_schema(state, config_data)
-    state.schema = schema
-    state.schema_source = source
+    missing = vault.missing_for_segments(config_data.segments)
+    if not missing:
+        try:
+            schema, source = load_schema(state, config_data)
+            state.schema = schema
+            state.schema_source = source
+        except SchemaError:
+            state.schema = {"tables": []}
+            state.schema_source = ""
 
-    app = create_app(state)
+    app = create_app(state, cors_origins=cors_origins)
     print(f"HTTP сервер запущен на {host}:{port}")
+    print(f"CORS разрешён для: {', '.join(cors_origins)}")
+    if missing:
+        print(
+            "Хранилище паролей не разблокировано — откройте интерфейс и введите мастер-пароль"
+        )
     app.run(host=host, port=port, threaded=True)

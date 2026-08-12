@@ -1,8 +1,13 @@
-import { Alert, Box, Snackbar } from '@mui/material';
+import { Alert, Box, Snackbar, Typography } from '@mui/material';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api/client';
 import { ConnectionsPanel } from './components/ConnectionsPanel';
+import { ConnectionSettingsDialog } from './components/ConnectionSettingsDialog';
+import {
+  CredentialsDialog,
+  type CredentialsDialogMode,
+} from './components/CredentialsDialog';
 import { ResizableSplit } from './components/ResizableSplit';
 import { ResultsPanel } from './components/ResultsPanel';
 import { SchemaExplorer } from './components/SchemaExplorer';
@@ -16,6 +21,7 @@ import type {
   SegmentHealthInfo,
   StatusResponse,
   TableDef,
+  CredentialsStatusResponse,
 } from './types';
 
 const theme = createTheme({
@@ -31,6 +37,10 @@ const theme = createTheme({
 
 const DEFAULT_SQL = 'SELECT 1 AS ok;';
 
+function isSqlPolicyError(message: string): boolean {
+  return /Запрещённая операция/i.test(message);
+}
+
 function allConnectionIds(groups: ConnectionGroup[]): string[] {
   return groups.flatMap((g) => g.connections.map((c) => c.id));
 }
@@ -41,7 +51,6 @@ function App() {
   const [schema, setSchema] = useState<DatabaseSchema | null>(null);
   const [schemaSource, setSchemaSource] = useState('');
   const [selectedSegments, setSelectedSegments] = useState<string[]>([]);
-  const [autocommit, setAutocommit] = useState(true);
   const [stopOnFirstMatch, setStopOnFirstMatch] = useState(false);
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [results, setResults] = useState<SegmentQueryResult[] | null>(null);
@@ -56,6 +65,17 @@ function App() {
     Record<string, SegmentHealthInfo>
   >({});
   const [healthChecking, setHealthChecking] = useState(false);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
+  const [credentialsMode, setCredentialsMode] =
+    useState<CredentialsDialogMode>('unlock');
+  const [credentialsStatus, setCredentialsStatus] =
+    useState<CredentialsStatusResponse | null>(null);
+  const [credentialsSubmitting, setCredentialsSubmitting] = useState(false);
+  const [credentialsError, setCredentialsError] = useState<string | null>(null);
+  const [credentialsReady, setCredentialsReady] = useState(false);
+  const [settingsConnectionId, setSettingsConnectionId] = useState<string | null>(
+    null,
+  );
   const queryIdRef = useRef<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const pollInFlightRef = useRef(false);
@@ -165,9 +185,121 @@ function App() {
     }
   }, [checkSegmentHealth]);
 
+  const applyCredentialsStatus = useCallback(
+    (status: CredentialsStatusResponse, segs: ConnectionGroup[]) => {
+      setCredentialsStatus(status);
+      setGroups(segs);
+
+      if (status.vault_segments.length === 0) {
+        setCredentialsReady(true);
+        setCredentialsOpen(false);
+        return false;
+      }
+
+      if (status.needs_setup) {
+        setCredentialsMode('setup');
+        setCredentialsOpen(true);
+        setCredentialsReady(false);
+        return false;
+      }
+
+      if (!status.unlocked) {
+        setCredentialsMode('unlock');
+        setCredentialsOpen(true);
+        setCredentialsReady(false);
+        return false;
+      }
+
+      if (status.missing.length > 0) {
+        setCredentialsMode('missing');
+        setCredentialsOpen(true);
+        setCredentialsReady(false);
+        return false;
+      }
+
+      setCredentialsOpen(false);
+      setCredentialsReady(true);
+      return true;
+    },
+    [],
+  );
+
+  const bootstrap = useCallback(async () => {
+    try {
+      const [st, creds, segs] = await Promise.all([
+        api.getStatus(),
+        api.getCredentialsStatus(),
+        api.getSegments(),
+      ]);
+      setStatus(st);
+      setConnected(true);
+      setError(null);
+      const ready = applyCredentialsStatus(creds, segs.groups);
+      if (ready) {
+        await loadInitial();
+      }
+    } catch (e) {
+      setConnected(false);
+      setError(e instanceof Error ? e.message : 'Failed to connect to API');
+    }
+  }, [applyCredentialsStatus, loadInitial]);
+
+  const handleCredentialsSubmit = useCallback(
+    async ({
+      masterPassword,
+      passwords,
+    }: {
+      masterPassword: string;
+      passwords: Record<string, string>;
+    }) => {
+      setCredentialsSubmitting(true);
+      setCredentialsError(null);
+      try {
+        let result;
+        if (credentialsMode === 'setup') {
+          result = await api.setupCredentials(masterPassword, passwords);
+        } else if (credentialsMode === 'unlock') {
+          result = await api.unlockCredentials(masterPassword);
+          if (result.missing.length > 0) {
+            const status = await api.getCredentialsStatus();
+            setCredentialsStatus(status);
+            setCredentialsMode('missing');
+            setCredentialsSubmitting(false);
+            return;
+          }
+        } else {
+          result = await api.saveCredentials(
+            passwords,
+            masterPassword || undefined,
+          );
+        }
+
+        const status = await api.getCredentialsStatus();
+        const segs = await api.getSegments();
+        const ready = applyCredentialsStatus(status, segs.groups);
+        if (ready) {
+          const sch = await api.reloadSchema();
+          setSchema(sch.schema);
+          setSchemaSource(sch.source);
+          await loadInitial();
+        } else if (result.missing.length > 0) {
+          setCredentialsMode('missing');
+        }
+        setCredentialsError(null);
+      } catch (e) {
+        setCredentialsError(
+          e instanceof Error ? e.message : 'Не удалось сохранить пароли',
+        );
+      } finally {
+        setCredentialsSubmitting(false);
+      }
+    },
+    [credentialsMode, applyCredentialsStatus, loadInitial],
+  );
+
   useEffect(() => {
-    loadInitial();
-  }, [loadInitial]);
+    void bootstrap();
+  }, [bootstrap]);
 
   const reloadSchema = async () => {
     setSchemaLoading(true);
@@ -211,7 +343,7 @@ function App() {
         sql: trimmed,
         segments: segmentFilter,
         stop_on_first_match: stopOnFirstMatch,
-        autocommit,
+        autocommit: true,
       });
       queryIdRef.current = start.query_id;
       pollTimerRef.current = window.setInterval(() => {
@@ -231,7 +363,6 @@ function App() {
     selectedSegments,
     groups,
     stopOnFirstMatch,
-    autocommit,
     targetSegmentNames,
     pollJob,
     stopPolling,
@@ -246,12 +377,12 @@ function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
-        if (!running && connected) void runQuery();
+        if (!running && connected && credentialsReady) void runQuery();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [runQuery, running, connected]);
+  }, [runQuery, running, connected, credentialsReady]);
 
   return (
     <ThemeProvider theme={theme}>
@@ -261,7 +392,6 @@ function App() {
           status={status}
           connected={connected}
           running={running}
-          autocommit={autocommit}
           onRun={runQuery}
           onCancel={() => void cancelQuery()}
         />
@@ -269,11 +399,41 @@ function App() {
         {error && !connected && (
           <Alert severity="error" sx={{ mx: 2, mt: 1 }}>
             {error}. Start backend:{' '}
-            <code>cargo run -p multiSectorBD --manifest-path back/Cargo.toml</code>
+            <code>python main.py --config segments.json --port 8080</code>
           </Alert>
         )}
 
-        <Box sx={{ flex: 1, display: 'flex', minHeight: 0 }}>
+        <CredentialsDialog
+          open={credentialsOpen}
+          mode={credentialsMode}
+          groups={groups}
+          missingIds={credentialsStatus?.missing ?? []}
+          credentialsPath={credentialsStatus?.credentials_path ?? 'credentials.enc'}
+          submitting={credentialsSubmitting}
+          error={credentialsError}
+          onSubmit={(payload) => void handleCredentialsSubmit(payload)}
+        />
+
+        <ConnectionSettingsDialog
+          connectionId={settingsConnectionId}
+          open={settingsConnectionId !== null}
+          onClose={() => setSettingsConnectionId(null)}
+          onSaved={() => {
+            void checkSegmentHealth();
+            void api.getCredentialsStatus().then((status) => {
+              setCredentialsStatus(status);
+            });
+          }}
+        />
+
+        <Box
+          sx={{
+            flex: 1,
+            display: 'flex',
+            minHeight: 0,
+            visibility: credentialsReady ? 'visible' : 'hidden',
+          }}
+        >
           <ResizableSplit
             direction="horizontal"
             initialFirstSize={320}
@@ -299,16 +459,15 @@ function App() {
                     <ConnectionsPanel
                       groups={groups}
                       selected={selectedSegments}
-                      autocommit={autocommit}
                       stopOnFirstMatch={stopOnFirstMatch}
                       segmentRunStatus={segmentRunStatus}
                       segmentHealth={segmentHealth}
                       healthChecking={healthChecking}
                       onSelectedChange={setSelectedSegments}
-                      onAutocommitChange={setAutocommit}
                       onStopOnFirstMatchChange={setStopOnFirstMatch}
                       onCancelSegment={(name) => void cancelQuery(name)}
                       onRefreshHealth={() => void checkSegmentHealth()}
+                      onOpenSettings={setSettingsConnectionId}
                     />
                   }
                   second={
@@ -345,11 +504,46 @@ function App() {
       </Box>
 
       <Snackbar
-        open={!!error && connected}
+        open={!!error && connected && !isSqlPolicyError(error ?? '')}
         autoHideDuration={6000}
         onClose={() => setError(null)}
         message={error}
       />
+
+      {error && connected && isSqlPolicyError(error) && (
+        <Box
+          sx={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: (theme) => theme.zIndex.modal + 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bgcolor: 'rgba(0, 0, 0, 0.25)',
+            pointerEvents: 'auto',
+          }}
+          onClick={() => setError(null)}
+        >
+          <Alert
+            severity="error"
+            variant="filled"
+            onClose={() => setError(null)}
+            onClick={(e) => e.stopPropagation()}
+            sx={{
+              maxWidth: 480,
+              mx: 2,
+              boxShadow: 6,
+            }}
+          >
+            <Typography variant="body1" fontWeight={600}>
+              {error}
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 0.5, opacity: 0.9 }}>
+              Разрешен только Select
+            </Typography>
+          </Alert>
+        </Box>
+      )}
     </ThemeProvider>
   );
 }

@@ -6,6 +6,10 @@ import type {
   SegmentsResponse,
   SegmentsHealthResponse,
   StatusResponse,
+  CredentialsStatusResponse,
+  CredentialsUnlockResponse,
+  ConnectionSettingsResponse,
+  ConnectionTestResponse,
 } from '../types';
 
 declare global {
@@ -50,6 +54,50 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getStatus: () => request<StatusResponse>('/api/status'),
+  getCredentialsStatus: () =>
+    request<CredentialsStatusResponse>('/api/credentials/status'),
+  unlockCredentials: (master_password: string) =>
+    request<CredentialsUnlockResponse>('/api/credentials/unlock', {
+      method: 'POST',
+      body: JSON.stringify({ master_password }),
+    }),
+  setupCredentials: (master_password: string, passwords: Record<string, string>) =>
+    request<CredentialsUnlockResponse>('/api/credentials/setup', {
+      method: 'POST',
+      body: JSON.stringify({ master_password, passwords }),
+    }),
+  saveCredentials: (
+    passwords: Record<string, string>,
+    master_password?: string,
+  ) =>
+    request<CredentialsUnlockResponse>('/api/credentials/save', {
+      method: 'POST',
+      body: JSON.stringify({ master_password, passwords }),
+    }),
+  lockCredentials: () =>
+    request<{ ok: boolean; unlocked: boolean }>('/api/credentials/lock', {
+      method: 'POST',
+    }),
+  getConnectionSettings: (connectionId: string) =>
+    request<ConnectionSettingsResponse>(
+      `/api/connections/${connectionId}/settings`,
+    ),
+  saveConnectionPassword: (connectionId: string, password: string) =>
+    request<{ ok: boolean; password_configured: boolean }>(
+      `/api/connections/${connectionId}/password`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      },
+    ),
+  testConnection: (connectionId: string, password?: string) =>
+    request<ConnectionTestResponse>(
+      `/api/connections/${connectionId}/test`,
+      {
+        method: 'POST',
+        body: JSON.stringify(password ? { password } : {}),
+      },
+    ),
   getSegments: () => request<SegmentsResponse>('/api/segments'),
   getSegmentsHealth: () => request<SegmentsHealthResponse>('/api/segments/health'),
   getSchema: () => request<SchemaResponse>('/api/schema'),

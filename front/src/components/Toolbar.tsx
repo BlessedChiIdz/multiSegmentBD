@@ -14,7 +14,6 @@ interface ToolbarProps {
   status: StatusResponse | null;
   connected: boolean;
   running: boolean;
-  autocommit: boolean;
   onRun: () => void;
   onCancel: () => void;
 }
@@ -23,7 +22,6 @@ export function Toolbar({
   status,
   connected,
   running,
-  autocommit,
   onRun,
   onCancel,
 }: ToolbarProps) {
@@ -58,12 +56,7 @@ export function Toolbar({
             Stop all
           </Button>
         )}
-        <Chip
-          size="small"
-          label={autocommit ? 'Autocommit' : 'Transaction'}
-          color={autocommit ? 'default' : 'warning'}
-          variant="outlined"
-        />
+        {/* Autocommit скрыт: у нас только SELECT*/}
         <Box sx={{ flex: 1 }} />
         {status && (
           <>
