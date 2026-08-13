@@ -5,6 +5,10 @@ import { api } from './api/client';
 import { ConnectionsPanel } from './components/ConnectionsPanel';
 import { ConnectionSettingsDialog } from './components/ConnectionSettingsDialog';
 import {
+  ProdQueryConfirmDialog,
+  prodSegmentIds,
+} from './components/ProdQueryConfirmDialog';
+import {
   CredentialsDialog,
   type CredentialsDialogMode,
 } from './components/CredentialsDialog';
@@ -76,6 +80,8 @@ function App() {
   const [settingsConnectionId, setSettingsConnectionId] = useState<string | null>(
     null,
   );
+  const [prodConfirmOpen, setProdConfirmOpen] = useState(false);
+  const [prodConfirmIds, setProdConfirmIds] = useState<string[]>([]);
   const queryIdRef = useRef<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const pollInFlightRef = useRef(false);
@@ -315,7 +321,7 @@ function App() {
     }
   };
 
-  const runQuery = useCallback(async () => {
+  const executeQuery = useCallback(async () => {
     const trimmed = sql.trim();
     if (!trimmed) {
       setError('SQL is empty');
@@ -367,6 +373,24 @@ function App() {
     pollJob,
     stopPolling,
   ]);
+
+  const runQuery = useCallback(async () => {
+    const trimmed = sql.trim();
+    if (!trimmed) {
+      setError('SQL is empty');
+      return;
+    }
+
+    const targets = targetSegmentNames();
+    const prodIds = prodSegmentIds(groups, targets);
+    if (prodIds.length > 0) {
+      setProdConfirmIds(prodIds);
+      setProdConfirmOpen(true);
+      return;
+    }
+
+    await executeQuery();
+  }, [sql, groups, targetSegmentNames, executeQuery]);
 
   const insertColumn = (table: TableDef, columnName: string) => {
     const snippet = `${quoteIdent(table.name)}.${quoteIdent(columnName)}`;
@@ -423,6 +447,21 @@ function App() {
             void api.getCredentialsStatus().then((status) => {
               setCredentialsStatus(status);
             });
+          }}
+        />
+
+        <ProdQueryConfirmDialog
+          open={prodConfirmOpen}
+          groups={groups}
+          segmentIds={prodConfirmIds}
+          onCancel={() => {
+            setProdConfirmOpen(false);
+            setProdConfirmIds([]);
+          }}
+          onConfirm={() => {
+            setProdConfirmOpen(false);
+            setProdConfirmIds([]);
+            void executeQuery();
           }}
         />
 

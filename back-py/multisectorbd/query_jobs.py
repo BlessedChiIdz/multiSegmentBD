@@ -73,7 +73,6 @@ class QueryJob:
             except Exception:
                 pass
             return
-        # Запрос ещё не дошёл до регистрации handler — повторить чуть позже.
         def retry_cancel(attempt: int = 0) -> None:
             if attempt >= 20:
                 return

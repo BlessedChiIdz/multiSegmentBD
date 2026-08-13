@@ -16,9 +16,9 @@ from multisectorbd.sql_policy import validate_select_only
 CancelCheck = Callable[[], bool]
 CancelRegister = Callable[[str, Callable[[], None] | None], None]
 
-# Держим соединение в пуле; если запросов нет — закрываем через POOL_IDLE_SECS.
 POOL_IDLE_SECS = 600
 POOL_RECYCLE_SECS = 600
+POOL_REAPER_INTERVAL_SECS = 60
 
 
 def _is_read_query(sql: str) -> bool:
@@ -201,11 +201,16 @@ class _EngineCache:
         return f"{seg.name}\0{password}"
 
     def _evict_idle(self, now: float) -> None:
-        stale = [
-            key
-            for key, cached in self._engines.items()
-            if now - cached.last_used > POOL_IDLE_SECS
-        ]
+        stale: list[str] = []
+        for key, cached in self._engines.items():
+            if now - cached.last_used <= POOL_IDLE_SECS:
+                continue
+            try:
+                if cached.engine.pool.checkedout() > 0:
+                    continue
+            except Exception:
+                pass
+            stale.append(key)
         for key in stale:
             cached = self._engines.pop(key)
             try:
@@ -213,7 +218,12 @@ class _EngineCache:
             except Exception:
                 pass
 
+    def evict_idle_connections(self) -> None:
+        with self._lock:
+            self._evict_idle(time.monotonic())
+
     def get_engine(self, seg: Segment, password_override: str | None = None) -> Engine:
+        _ensure_idle_reaper()
         key = self._cache_key(seg, password_override)
         now = time.monotonic()
         with self._lock:
@@ -262,6 +272,32 @@ class _EngineCache:
 
 
 _engine_cache = _EngineCache()
+
+_reaper_started = False
+_reaper_lock = threading.Lock()
+
+
+def _idle_reaper_loop() -> None:
+    while True:
+        time.sleep(POOL_REAPER_INTERVAL_SECS)
+        try:
+            _engine_cache.evict_idle_connections()
+        except Exception:
+            pass
+
+
+def _ensure_idle_reaper() -> None:
+    global _reaper_started
+    with _reaper_lock:
+        if _reaper_started:
+            return
+        _reaper_started = True
+        thread = threading.Thread(
+            target=_idle_reaper_loop,
+            name="db-pool-idle-reaper",
+            daemon=True,
+        )
+        thread.start()
 
 
 def invalidate_segment_engines(segment_name: str) -> None:
