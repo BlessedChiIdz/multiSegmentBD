@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/multiSectorBD.iml" filepath="$PROJECT_DIR$/.idea/multiSectorBD.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/multiSegmentBD.iml" filepath="$PROJECT_DIR$/.idea/multiSegmentBD.iml" />
     </modules>
   </component>
 </project>
