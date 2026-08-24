@@ -23,6 +23,7 @@ from multisectorbd.query_jobs import QueryJobError, query_job_manager
 from multisectorbd.schema_fetch import SchemaError
 from multisectorbd.segment_health import check_all_segments
 from multisectorbd.state import AppState
+from multisectorbd.transport_crypto import TransportCrypto, TransportCryptoError
 
 DEFAULT_CORS_ORIGINS: tuple[str, ...] = (
     "http://localhost:3000",
@@ -53,6 +54,19 @@ def _credentials_error_response(exc: CredentialsLockedError):
         ),
         403,
     )
+
+
+def _resolve_secret(
+    body: dict,
+    *,
+    plain_key: str,
+    encrypted_key: str,
+    transport: TransportCrypto,
+) -> str:
+    encrypted = body.get(encrypted_key)
+    if encrypted is not None and str(encrypted).strip():
+        return transport.decrypt(str(encrypted))
+    return str(body.get(plain_key, ""))
 
 
 def create_app(
@@ -101,6 +115,11 @@ def create_app(
             return jsonify({"error": str(exc)}), 500
         return jsonify(s.vault.status_payload(config.segments))
 
+    @app.route("/api/credentials/transport-key", methods=["GET"])
+    def credentials_transport_key():
+        s: AppState = app.config["APP_STATE"]
+        return jsonify(s.transport_crypto.payload())
+
     @app.route("/api/credentials/unlock", methods=["POST", "OPTIONS"])
     def credentials_unlock():
         if request.method == "OPTIONS":
@@ -108,11 +127,17 @@ def create_app(
 
         s: AppState = app.config["APP_STATE"]
         body = request.get_json(silent=True) or {}
-        master_password = str(body.get("master_password", ""))
-
         try:
+            master_password = _resolve_secret(
+                body,
+                plain_key="master_password",
+                encrypted_key="encrypted_master_password",
+                transport=s.transport_crypto,
+            )
             s.vault.unlock(master_password)
             config = validate_config_path(s.config_path)
+        except TransportCryptoError as exc:
+            return jsonify({"error": str(exc)}), 400
         except (CredentialVaultError, ConfigError) as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -132,7 +157,15 @@ def create_app(
 
         s: AppState = app.config["APP_STATE"]
         body = request.get_json(silent=True) or {}
-        master_password = str(body.get("master_password", ""))
+        try:
+            master_password = _resolve_secret(
+                body,
+                plain_key="master_password",
+                encrypted_key="encrypted_master_password",
+                transport=s.transport_crypto,
+            )
+        except TransportCryptoError as exc:
+            return jsonify({"error": str(exc)}), 400
         raw_passwords = body.get("passwords") or {}
         if not isinstance(raw_passwords, dict):
             return jsonify({"error": "passwords должен быть объектом"}), 400
@@ -161,7 +194,15 @@ def create_app(
 
         s: AppState = app.config["APP_STATE"]
         body = request.get_json(silent=True) or {}
-        master_password = str(body.get("master_password", ""))
+        try:
+            master_password = _resolve_secret(
+                body,
+                plain_key="master_password",
+                encrypted_key="encrypted_master_password",
+                transport=s.transport_crypto,
+            )
+        except TransportCryptoError as exc:
+            return jsonify({"error": str(exc)}), 400
         raw_passwords = body.get("passwords") or {}
         if not isinstance(raw_passwords, dict):
             return jsonify({"error": "passwords должен быть объектом"}), 400
@@ -229,7 +270,15 @@ def create_app(
 
         s: AppState = app.config["APP_STATE"]
         body = request.get_json(silent=True) or {}
-        password = str(body.get("password", ""))
+        try:
+            password = _resolve_secret(
+                body,
+                plain_key="password",
+                encrypted_key="encrypted_password",
+                transport=s.transport_crypto,
+            )
+        except TransportCryptoError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         try:
             config = validate_config_path(s.config_path)
@@ -259,9 +308,17 @@ def create_app(
 
         s: AppState = app.config["APP_STATE"]
         body = request.get_json(silent=True) or {}
-        password_override = body.get("password")
-        if password_override is not None:
-            password_override = str(password_override)
+        password_override = None
+        if body.get("encrypted_password") or body.get("password"):
+            try:
+                password_override = _resolve_secret(
+                    body,
+                    plain_key="password",
+                    encrypted_key="encrypted_password",
+                    transport=s.transport_crypto,
+                )
+            except TransportCryptoError as exc:
+                return jsonify({"error": str(exc)}), 400
 
         try:
             config = validate_config_path(s.config_path)

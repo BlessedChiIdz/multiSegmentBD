@@ -11,6 +11,7 @@ import type {
   ConnectionSettingsResponse,
   ConnectionTestResponse,
 } from '../types';
+import { encryptSecret } from '../utils/transportCrypto';
 
 declare global {
   interface Window {
@@ -56,24 +57,33 @@ export const api = {
   getStatus: () => request<StatusResponse>('/api/status'),
   getCredentialsStatus: () =>
     request<CredentialsStatusResponse>('/api/credentials/status'),
-  unlockCredentials: (master_password: string) =>
-    request<CredentialsUnlockResponse>('/api/credentials/unlock', {
+  unlockCredentials: async (master_password: string) => {
+    const encrypted_master_password = await encryptSecret(master_password);
+    return request<CredentialsUnlockResponse>('/api/credentials/unlock', {
       method: 'POST',
-      body: JSON.stringify({ master_password }),
-    }),
-  setupCredentials: (master_password: string, passwords: Record<string, string>) =>
-    request<CredentialsUnlockResponse>('/api/credentials/setup', {
+      body: JSON.stringify({ encrypted_master_password }),
+    });
+  },
+  setupCredentials: async (master_password: string, passwords: Record<string, string>) => {
+    const encrypted_master_password = await encryptSecret(master_password);
+    return request<CredentialsUnlockResponse>('/api/credentials/setup', {
       method: 'POST',
-      body: JSON.stringify({ master_password, passwords }),
-    }),
-  saveCredentials: (
+      body: JSON.stringify({ encrypted_master_password, passwords }),
+    });
+  },
+  saveCredentials: async (
     passwords: Record<string, string>,
     master_password?: string,
-  ) =>
-    request<CredentialsUnlockResponse>('/api/credentials/save', {
+  ) => {
+    const body: Record<string, unknown> = { passwords };
+    if (master_password) {
+      body.encrypted_master_password = await encryptSecret(master_password);
+    }
+    return request<CredentialsUnlockResponse>('/api/credentials/save', {
       method: 'POST',
-      body: JSON.stringify({ master_password, passwords }),
-    }),
+      body: JSON.stringify(body),
+    });
+  },
   lockCredentials: () =>
     request<{ ok: boolean; unlocked: boolean }>('/api/credentials/lock', {
       method: 'POST',
@@ -82,22 +92,29 @@ export const api = {
     request<ConnectionSettingsResponse>(
       `/api/connections/${connectionId}/settings`,
     ),
-  saveConnectionPassword: (connectionId: string, password: string) =>
-    request<{ ok: boolean; password_configured: boolean }>(
+  saveConnectionPassword: async (connectionId: string, password: string) => {
+    const encrypted_password = await encryptSecret(password);
+    return request<{ ok: boolean; password_configured: boolean }>(
       `/api/connections/${connectionId}/password`,
       {
         method: 'POST',
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ encrypted_password }),
       },
-    ),
-  testConnection: (connectionId: string, password?: string) =>
-    request<ConnectionTestResponse>(
+    );
+  },
+  testConnection: async (connectionId: string, password?: string) => {
+    const body: Record<string, string> = {};
+    if (password) {
+      body.encrypted_password = await encryptSecret(password);
+    }
+    return request<ConnectionTestResponse>(
       `/api/connections/${connectionId}/test`,
       {
         method: 'POST',
-        body: JSON.stringify(password ? { password } : {}),
+        body: JSON.stringify(body),
       },
-    ),
+    );
+  },
   getSegments: () => request<SegmentsResponse>('/api/segments'),
   getSegmentsHealth: () => request<SegmentsHealthResponse>('/api/segments/health'),
   getSchema: () => request<SchemaResponse>('/api/schema'),
